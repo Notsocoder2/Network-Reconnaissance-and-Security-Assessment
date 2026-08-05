@@ -1,0 +1,14 @@
+## Prerequisites
+
+Before running the project, ensure the following tools are installed on your Kali Linux system:
+
+- Python 3
+- Nmap
+- Netdiscover
+- Wireshark
+
+Install the Python dependency:
+
+```bash
+pip install -r requirements.txt
+```
