@@ -1,146 +1,85 @@
-import ipaddress
-import os
+"""Operating system fingerprinting using Nmap."""
+
+from __future__ import annotations
+
 import re
-import subprocess
+import sys
+from typing import Dict
 
-def get_target():
+from scanner import common
 
-    while True:
-        target = input("Enter Target IP:").strip()
+TXT_FILE = "os_detection.txt"
+JSON_FILE = "os_detection.json"
 
-        try:
+# nmap prints "Running: ..." (or "Running (JUST GUESSING): ...") with a capital R,
+# so matching is case-insensitive. Fields may have several fallbacks.
+_PATTERNS = {
+    "Running": (r"^Running(?: \(JUST GUESSING\))?:\s*(.+)$",),
+    "OS Details": (r"^OS details:\s*(.+)$", r"^Aggressive OS guesses:\s*(.+)$"),
+    "Device Type": (r"^Device type:\s*(.+)$",),
+    "Network Distance": (r"^Network Distance:\s*(.+)$",),
+}
 
-            ipaddress.ip_address(target)
 
-            return target
-        except ValueError:
-            print("Invalid IP address. Try Again")
+def run_os_detection(target, timeout: int = common.DEFAULT_TIMEOUT) -> str:
+    result = common.run_command(
+        ["nmap", "-O", str(target)], timeout=timeout, needs_root=True
+    )
+    return result.stdout
 
 
-def run_os_detection(target):
+def extract_os_info(output: str) -> Dict[str, str]:
+    info: Dict[str, str] = {}
+    for field, patterns in _PATTERNS.items():
+        info[field] = "Unknown"
+        for pattern in patterns:
+            match = re.search(pattern, output, re.MULTILINE | re.IGNORECASE)
+            if match:
+                info[field] = match.group(1).strip()
+                break
+    return info
 
-    print("\nRunning Nmap OS Detection...\n")
 
-    try:
+def render_results(target, os_info: Dict[str, str]) -> str:
+    text = common.build_header("OS DETECTION RESULTS", {"Target": target})
+    for field in _PATTERNS:
+        text += f"{field}: {os_info[field]}\n"
+    return text
 
-        result = subprocess.run(
-            [
-                "sudo",
-                "nmap",
-                "-O",
-                target
-            ],
 
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
+def run(
+    target,
+    output_dir: str = common.DEFAULT_OUTPUT_DIR,
+    timeout: int = common.DEFAULT_TIMEOUT,
+) -> Dict[str, str]:
+    print(f"Running Nmap OS detection on {target}...\n")
+    output = run_os_detection(target, timeout)
+    os_info = extract_os_info(output)
+    if "Host seems down" in output:
+        common.LOGGER.warning("nmap reports that %s appears to be down.", target)
 
-        return result.stdout
-    
-    except subprocess.TimeoutExpired:
-
-        print("OS Detection Timed Out.")
-        return ""
-    
-    except FileNotFoundError:
-        print("Nmap is not installed.")
-
-        return ""
-    
-    except Exception as e:
-
-        print(f"Error : {e}")
-
-        return ""
-    
-def extract_os_info(output):
-    os_info = {
-
-        "Running": "Unknown",
-        "OS Details": "Unknown",
-        "Device Type": "Unknown",
-        "Network Distance": "Unknown"
-    }
-
-    running_match = re.search(r"running:\s*(.*)", output)
-
-    if running_match:
-
-        os_info["Running"] = running_match.group(1).strip()
-
-    details_match = re.search(r"OS details:\s*(.*)", output)
-
-    if details_match:
-
-        os_info["OS Details"] = details_match.group(1).strip()
-
-    device_match = re.search(r"Device type:\s*(.*)", output)
-
-    if device_match:
-
-        os_info["Device Type"] = device_match.group(1).strip()
-
-    distance_match = re.search(r"Network Distance:\s*(.*)", output)
-
-    if distance_match:
-
-        os_info["Network Distance"] = distance_match.group(1).strip()
-
+    text = render_results(target, os_info)
+    print(text)
+    path = common.write_text(output_dir, TXT_FILE, text)
+    common.write_json(
+        output_dir,
+        JSON_FILE,
+        {"target": str(target), "timestamp": common.timestamp(), "os_info": os_info},
+    )
+    print(f"Results saved to {path}")
     return os_info
 
-def display_os_info(os_info):
-    print("\nOS Detection Results\n")
 
-    print("-" * 50)
+def main() -> int:
+    """Interactive entry point: python3 -m scanner.os_detection"""
 
-    print(f"RUnning           :{os_info['Running']}")
+    def interactive() -> None:
+        target = common.prompt_target()
+        common.confirm_authorization(f"target {target}")
+        run(target)
 
-    print(f"OS Details        : {os_info['OS Details']}")
-
-    print(f"Device Type       : {os_info['Device Type']}")
-
-    print(f"Network Distance  : {os_info['Network Distance']}")
-
-def save_results(os_info):
-
-    os.makedirs("results", exist_ok=True)
-
-    file_path = os.path.join(
-        "results",
-        "os_detection.txt"
-    )
-
-    with open(file_path, "w") as file:
-
-        file.write("OS DETECTION RESULTS\n")
-        file.write("=" * 60 + "\n\n")
-
-        file.write(f"Running: {os_info['Running']}\n")
-        file.write(f"OS Details: {os_info['OS Details']}\n")
-        file.write(f"Device Type: {os_info['Device Type']}\n")
-        file.write(f"Network Distance: {os_info['Network Distance']}\n")
-
-    print(f"\nResults saved to {file_path}")
-
-
-def main():
-    target = get_target()
-
-    print("\nValid Target Found")
-
-    print(target)
-
-    output = run_os_detection(target)
-
-    os_info = extract_os_info(output)
-
-    display_os_info(os_info)
-
-    save_results(os_info)
+    return common.run_cli(interactive)
 
 
 if __name__ == "__main__":
-
-    main()
-
+    sys.exit(main())

@@ -1,217 +1,128 @@
-import ipaddress
-import os 
-import subprocess
+"""Service and version detection using Nmap."""
 
-def get_target():
+from __future__ import annotations
 
-    while True:
+import re
+import sys
+from typing import Dict, List, Tuple
 
-        target = input("enter target IP: ").strip()
+from scanner import common
 
-        try:
+TXT_FILE = "service_detection.txt"
+JSON_FILE = "service_detection.json"
 
-            ipaddress.ip_address(target)
-
-            return target
-        
-        except ValueError:
-
-            print("Invalid IP address. Try Again")
-            
-
-def get_port_range():
-
-    while True:
-
-        try:
-
-            start_port = int(input("Enter starting port"))
-            end_port = int(input("Enter ending port"))
-
-            if start_port < 1 or end_port > 65535 or start_port> end_port:
-                print("Invalid Port range. Try again.\n")
-
-            else:
-                return start_port,end_port
-        
-        except ValueError:
-
-            print("Ports must be integers\n")
+# e.g. "22/tcp   open  ssh   OpenSSH 8.9p1 Ubuntu"
+_SERVICE_LINE = re.compile(
+    r"^(?P<port>\d{1,5}/(?:tcp|udp))\s+(?P<state>\S+)\s+(?P<service>\S+)"
+    r"(?:\s+(?P<version>.*\S))?\s*$"
+)
 
 
-def run_service_detection(target,start_port,end_port):
-
-    print("\nRunning Service Detection....\n")
-
-    try:
-
-        result = subprocess.run(
-            [
-                "sudo",
-                "nmap",
-                "-sV",
-                target,
-                "-p",
-                f"{start_port}--{end_port}"
-            ],
-
-            capture_output=True,
-            text=True,
-            timeout=120
-        )
-        return result.stdout
-    except subprocess.TimeoutExpired:
-
-        print("Service Detection Timed out.")
-
-        return ""
-    
-    except FileNotFoundError:
-        print("Nmap is not installed.")
-
-        return ""
-    
-    except Exception as e:
-        print(f"Error :{e}")
-
-        return ""
+def format_port_spec(start_port: int, end_port: int) -> str:
+    """Nmap port specification: '22' for one port, '1-1024' for a range."""
+    return str(start_port) if start_port == end_port else f"{start_port}-{end_port}"
 
 
-def extract_services(output):
+def build_command(target, start_port: int, end_port: int) -> List[str]:
+    return ["nmap", "-sV", "-p", format_port_spec(start_port, end_port), str(target)]
 
-    services = []
 
-    lines = output.splitlines()
+def run_service_detection(
+    target, start_port: int, end_port: int, timeout: int = common.DEFAULT_TIMEOUT
+) -> str:
+    result = common.run_command(
+        build_command(target, start_port, end_port), timeout=timeout
+    )
+    return result.stdout
 
-    for line in lines:
 
-        if "/tcp" in line or "/udp" in line:
-
-            parts = line.split()
-
-            if len(parts) >=3:
-
-                service = {
-
-                    "Port": parts[0],
-                    "State": parts[1],
-                    "Service": parts[2],
-
-                    "Version": " ".join(parts[3:]) if len(parts) > 3 else "Unknown"
+def extract_services(output: str) -> List[Dict[str, str]]:
+    """Parse the nmap port table into service records."""
+    services: List[Dict[str, str]] = []
+    for line in output.splitlines():
+        match = _SERVICE_LINE.match(line.strip())
+        if match:
+            services.append(
+                {
+                    "Port": match.group("port"),
+                    "State": match.group("state"),
+                    "Service": match.group("service"),
+                    "Version": match.group("version") or "Unknown",
                 }
-
-                services.append(service)
-
+            )
     return services
 
-def display_services(services):
-    print("\nSERVICE DETECTION RESULTS\n")
 
-    if not services:
+def host_is_up(output: str) -> bool:
+    return "Host seems down" not in output
 
-        print("No Services Detected.")
 
-        return
-
-    print("{:<12}{:<10}{:<15}{}".format(
-
-        "Port",
-
-        "State",
-
-        "Service",
-
-        "Version"
-
-    ))
-
-    print("-" * 80)
-
-    for service in services:
-
-        print(
-
-            "{:<12}{:<10}{:<15}{}".format(
-
-                service["Port"],
-
-                service["State"],
-
-                service["Service"],
-
-                service["Version"]
-
-            )
-
+def render_results(
+    target, ports: Tuple[int, int], services: List[Dict[str, str]], host_up: bool
+) -> str:
+    text = common.build_header(
+        "SERVICE DETECTION RESULTS",
+        {"Target": target, "Ports": format_port_spec(*ports)},
+    )
+    if not host_up:
+        text += (
+            "WARNING: nmap reported the host as down; verify the target address "
+            "(results may be incomplete).\n\n"
         )
+    if services:
+        rows = [(s["Port"], s["State"], s["Service"], s["Version"]) for s in services]
+        text += common.format_table(("Port", "State", "Service", "Version"), rows)
+        text += f"\n\nTotal Ports Listed: {len(services)}\n"
+    else:
+        text += "No services detected.\n"
+    return text
 
 
-def save_results(target, services):
-
-    os.makedirs("results", exist_ok=True)
-
-    file_path = os.path.join(
-
-        "results",
-
-        "service_detection.txt"
-
-    )
-
-    with open(file_path, "w") as file:
-
-        file.write("SERVICE DETECTION RESULTS\n")
-        file.write("=" * 60 + "\n\n")
-
-        file.write(f"Target: {target}\n\n")
-
-        if services:
-
-            for service in services:
-
-                file.write(f"Port: {service['Port']}\n")
-                file.write(f"State: {service['State']}\n")
-                file.write(f"Service: {service['Service']}\n")
-                file.write(f"Version: {service['Version']}\n")
-                file.write("-" * 40 + "\n")
-
-        else:
-
-            file.write("No Services Detected.\n")
-
-    print(f"\nResults saved to {file_path}")
-
-
-def main():
-
-    target = get_target()
-
-    start_port, end_port = get_port_range()
-
-    output = run_service_detection(
-        target,
-        start_port,
-        end_port
-    )
-
+def run(
+    target,
+    ports: Tuple[int, int],
+    output_dir: str = common.DEFAULT_OUTPUT_DIR,
+    timeout: int = common.DEFAULT_TIMEOUT,
+) -> List[Dict[str, str]]:
+    start_port, end_port = ports
+    print(f"Running service detection on {target} (ports {format_port_spec(*ports)})...\n")
+    output = run_service_detection(target, start_port, end_port, timeout)
     services = extract_services(output)
+    host_up = host_is_up(output)
+    if not host_up:
+        common.LOGGER.warning("nmap reports that %s appears to be down.", target)
 
-    display_services(services)
-
-    save_results(
-
-        target,
-
-        services
-
+    text = render_results(target, ports, services, host_up)
+    print(text)
+    path = common.write_text(output_dir, TXT_FILE, text)
+    common.write_json(
+        output_dir,
+        JSON_FILE,
+        {
+            "target": str(target),
+            "ports": format_port_spec(*ports),
+            "timestamp": common.timestamp(),
+            "host_up": host_up,
+            "services": services,
+        },
     )
-    
+    print(f"Results saved to {path}")
+    return services
+
+
+def main() -> int:
+    """Interactive entry point: python3 -m scanner.service_detection"""
+
+    def interactive() -> None:
+        target = common.prompt_target()
+        ports = common.prompt_ports()
+        common.confirm_authorization(
+            f"target {target}, ports {format_port_spec(*ports)}"
+        )
+        run(target, ports)
+
+    return common.run_cli(interactive)
+
+
 if __name__ == "__main__":
-
-    main()
-
-
-
-
-        
-   
+    sys.exit(main())

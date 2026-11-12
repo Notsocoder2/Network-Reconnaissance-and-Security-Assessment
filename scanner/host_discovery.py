@@ -1,142 +1,89 @@
+"""Host discovery on the local network segment using Netdiscover (ARP)."""
+
+from __future__ import annotations
+
 import ipaddress
-import os
-import subprocess
 import re
+import sys
+from typing import Dict, List
+
+from scanner import common
+
+TXT_FILE = "host_discovery.txt"
+JSON_FILE = "host_discovery.json"
+
+_HOST_PATTERN = re.compile(
+    r"^\s*(\d{1,3}(?:\.\d{1,3}){3})\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b",
+    re.MULTILINE,
+)
 
 
-def get_network():
+def run_netdiscover(subnet, timeout: int = common.DEFAULT_TIMEOUT) -> str:
+    """Run a one-shot active ARP scan.
 
-    while True:
-        network = input("Enter subnet: ").strip()
+    ``-P`` prints parseable output and exits after the scan (without it
+    Netdiscover starts an interactive UI and never returns), ``-N`` drops the header.
+    """
+    result = common.run_command(
+        ["netdiscover", "-P", "-N", "-r", str(subnet)],
+        timeout=timeout,
+        needs_root=True,
+    )
+    return result.stdout
+
+
+def extract_hosts(output: str) -> List[Dict[str, str]]:
+    """Parse Netdiscover output into unique, IP-sorted host records."""
+    hosts: Dict[str, Dict[str, str]] = {}
+    for ip, mac in _HOST_PATTERN.findall(output):
         try:
-            subnet = ipaddress.ip_network(network, strict=False)
-            return subnet
+            ipaddress.ip_address(ip)
         except ValueError:
-            print("Invalid subnet. Try Again.")
+            continue
+        hosts.setdefault(ip, {"IP": ip, "MAC": mac})
+    return sorted(hosts.values(), key=lambda host: ipaddress.ip_address(host["IP"]))
 
-def run_netdiscover(subnet):
-    print("\nRunning Netdiscover...\n")
 
-    try:
-        result = subprocess.run(
-            [
-                "sudo",
-                "netdiscover",
-                "-r",
-                str(subnet)
+def render_results(subnet, hosts: List[Dict[str, str]]) -> str:
+    text = common.build_header("HOST DISCOVERY RESULTS", {"Subnet": subnet})
+    if hosts:
+        rows = [(host["IP"], host["MAC"]) for host in hosts]
+        text += common.format_table(("IP Address", "MAC Address"), rows) + "\n\n"
+        text += f"Total Hosts Found: {len(hosts)}\n"
+    else:
+        text += "No hosts found.\n"
+    return text
 
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
 
-        return result.stdout
-    except subprocess.TimeoutExpired:
-
-        print("Netdiscover scan timed out. ")
-
-        return ""
-    
-    except FileNotFoundError:
-
-        print("Netdiscover is not installed.")
-
-        return ""
-    except Exception as e:
-
-        print(f"Error: {e}")
-
-        return ""
-    
-
-def extract_hosts(output):
-
-    hosts = []
-
-    pattern = r"(\d+\.\d+\.\d+\.\d+)\s+([0-9A-Fa-f:]{17})"
-    matches = re.findall(pattern, output)
-
-    for ip, mac in matches:
-
-        host = {
-
-            "IP": ip,
-
-            "MAC": mac
-
-        }
-
-        hosts.append(host)
-
+def run(
+    subnet,
+    output_dir: str = common.DEFAULT_OUTPUT_DIR,
+    timeout: int = common.DEFAULT_TIMEOUT,
+) -> List[Dict[str, str]]:
+    print(f"Running Netdiscover on {subnet}...\n")
+    hosts = extract_hosts(run_netdiscover(subnet, timeout))
+    text = render_results(subnet, hosts)
+    print(text)
+    path = common.write_text(output_dir, TXT_FILE, text)
+    common.write_json(
+        output_dir,
+        JSON_FILE,
+        {"subnet": str(subnet), "timestamp": common.timestamp(), "hosts": hosts},
+    )
+    print(f"Results saved to {path}")
     return hosts
 
 
-def display_hosts(hosts):
+def main() -> int:
+    """Interactive entry point: python3 -m scanner.host_discovery"""
 
-    print("\nDiscovered Hosts\n")
+    def interactive() -> None:
+        subnet = common.prompt_network()
+        common.confirm_authorization(f"subnet {subnet}")
+        run(subnet)
 
-    if not hosts:
+    return common.run_cli(interactive)
 
-        print("No hosts found.")
-
-        return
-
-    print("{:<18}{}".format("IP Address", "MAC Address"))
-
-    print("-" * 40)
-
-    for host in hosts:
-
-        print("{:<18}{}".format(host["IP"], host["MAC"]))
-
-
-def save_results(hosts):
-
-    os.makedirs("results", exist_ok=True)
-
-    file_path = os.path.join("results", "host_discovery.txt")
-
-    with open(file_path, "w") as file:
-
-        file.write("HOST DISCOVERY RESULTS\n")
-
-        file.write("-" * 40 + "\n")
-
-        if hosts:
-
-            for host in hosts:
-
-                file.write(f"{host['IP']:<18}{host['MAC']}\n")
-
-            file.write("\n")
-
-            file.write(f"Total Hosts Found: {len(hosts)}\n")
-
-        else:
-
-            file.write("No hosts found.\n")
-
-    print(f"\nResults saved to {file_path}")
-
-
-
-def main():
-
-    subnet = get_network()
-
-    print("\nValid network found")
-    print(subnet)
-
-    output = run_netdiscover(subnet)
-
-    hosts = extract_hosts(output)
-
-    display_hosts(hosts)
-
-    save_results(hosts)
-  
 
 if __name__ == "__main__":
-
-    main()
+    sys.exit(main())

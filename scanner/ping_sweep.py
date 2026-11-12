@@ -1,201 +1,92 @@
-import ipaddress
-import os
+"""Ping sweep (live host detection) using Nmap."""
+
+from __future__ import annotations
+
 import re
-import subprocess
+import sys
+from typing import Dict, List
+
+from scanner import common
+
+TXT_FILE = "ping_sweep.txt"
+JSON_FILE = "ping_sweep.json"
+
+_IP = r"\d{1,3}(?:\.\d{1,3}){3}"
+# "Nmap scan report for router.lan (192.168.1.1)"  or  "Nmap scan report for 192.168.1.5"
+_REPORT_LINE = re.compile(
+    rf"^Nmap scan report for (?:(?P<host>\S+) \((?P<ip>{_IP})\)|(?P<bare>{_IP}))$"
+)
 
 
-
-def get_network():
-
-    while True:
-
-        network = input("Enter subnet (Example: 192.168.1.0/24): ").strip()
-
-        try:
-
-            subnet = ipaddress.ip_network(network, strict=False)
-
-            return subnet
-
-        except ValueError:
-
-            print("Invalid subnet. Try Again.")
-
-def run_pingsweep(subnet):
-    print("\nRunning Ping Sweep.....\n")
-
-    try:
-        result = subprocess.run(
-            [
-                "nmap",
-                "-sn",
-                str(subnet)
-            ],
-            capture_output = True,
-            text = True,
-            timeout = 60
+def run_pingsweep(subnet, timeout: int = common.DEFAULT_TIMEOUT) -> str:
+    if not common.is_root():
+        common.LOGGER.warning(
+            "Running without root: nmap uses TCP probes instead of ARP, so hosts on "
+            "the local network may be missed."
         )
-
-        return result.stdout
-    except subprocess.TimeoutExpired:
-
-        print("Ping Sweep Timed out.")
-
-        return ""
-    
-    except FileNotFoundError:
-
-        print("Nmap is not Installed.")
-
-        return ""
-    
-    except Exception as e:
-        print(f"Error : {e}")
-        return ""
-    
+    result = common.run_command(["nmap", "-sn", str(subnet)], timeout=timeout)
+    return result.stdout
 
 
-def extract_hosts(output):
-
-    hosts = []
-
-    host_pattern = r"Nmap scan report for (.+)"
-    ip_pattern = r"\((\d+\.\d+\.\d+\.\d+)\)"
-
-    lines = output.splitlines()
-
-    current_host = {}
-
-    for line in lines:
-
-        if "Nmap scan report for" in line:
-
-            current_host = {}
-
-            ip_match = re.search(ip_pattern, line)
-
-            if ip_match:
-
-                current_host["IP"] = ip_match.group(1)
-
-                hostname = line.replace(
-                    f"Nmap scan report for {ip_match.group(0)}",
-                    ""
-                ).strip()
-
-                current_host["Hostname"] = hostname if hostname else "N/A"
-
-            else:
-
-                current_host["IP"] = line.split()[-1]
-
-                current_host["Hostname"] = "N/A"
-
-        elif "Host is up" in line:
-
-            current_host["Status"] = "Up"
-
-            hosts.append(current_host)
-
+def extract_hosts(output: str) -> List[Dict[str, str]]:
+    """Parse ``nmap -sn`` output into live-host records."""
+    hosts: List[Dict[str, str]] = []
+    current = None
+    for line in output.splitlines():
+        line = line.strip()
+        match = _REPORT_LINE.match(line)
+        if match:
+            current = {
+                "IP": match.group("ip") or match.group("bare"),
+                "Hostname": match.group("host") or "N/A",
+            }
+        elif line.startswith("Host is up") and current is not None:
+            current["Status"] = "Up"
+            hosts.append(current)
+            current = None
     return hosts
 
-def display_hosts(hosts):
-    print("\nLive Hosts\n")
 
-    if not hosts:
-        print("No live Hosts found.")
+def render_results(subnet, hosts: List[Dict[str, str]]) -> str:
+    text = common.build_header("PING SWEEP RESULTS", {"Subnet": subnet})
+    if hosts:
+        rows = [(h["IP"], h["Hostname"], h["Status"]) for h in hosts]
+        text += common.format_table(("IP Address", "Hostname", "Status"), rows) + "\n\n"
+        text += f"Total Live Hosts: {len(hosts)}\n"
+    else:
+        text += "No live hosts found.\n"
+    return text
 
-        return
-    print("{:<18}{:<30}{}".format("IP Address", "Hostname", "Status"))
 
-    print("-" * 65)
+def run(
+    subnet,
+    output_dir: str = common.DEFAULT_OUTPUT_DIR,
+    timeout: int = common.DEFAULT_TIMEOUT,
+) -> List[Dict[str, str]]:
+    print(f"Running ping sweep on {subnet}...\n")
+    hosts = extract_hosts(run_pingsweep(subnet, timeout))
+    text = render_results(subnet, hosts)
+    print(text)
+    path = common.write_text(output_dir, TXT_FILE, text)
+    common.write_json(
+        output_dir,
+        JSON_FILE,
+        {"subnet": str(subnet), "timestamp": common.timestamp(), "hosts": hosts},
+    )
+    print(f"Results saved to {path}")
+    return hosts
 
-    for host in hosts:
-        
-        print(
 
-            "{:<18}{:<30}{}".format(
+def main() -> int:
+    """Interactive entry point: python3 -m scanner.ping_sweep"""
 
-                host["IP"],
+    def interactive() -> None:
+        subnet = common.prompt_network()
+        common.confirm_authorization(f"subnet {subnet}")
+        run(subnet)
 
-                host["Hostname"],
-
-                host["Status"]
-
-            )
-
-        )
-
-def save_results(hosts):
-
-    os.makedirs("results", exist_ok = True)
-
-    file_path = os.path.join("results", "ping_sweep.txt")
-
-    with open(file_path, "w") as file:
-
-        file.write("PING SWEEP RESULTS\n")
-
-        file.write("-"*60 +"\n")
-        
-        if hosts:
-            file.write("{:<18}{:<30}{}\n".format(
-
-                "IP Address",
-
-                "Hostname",
-
-                "Status"
-
-            ))
-
-            file.write("-"*60 + "\n")
-
-            for host in hosts:
-                file.write(
-
-                    "{:<18}{:<30}{}\n".format(
-
-                        host["IP"],
-
-                        host["Hostname"],
-
-                        host["Status"]
-
-                    )
-
-                )
-
-            file.write("\n")
-
-            file.write(f"Total Live Hosts: {len(hosts)}\n")
-
-        else:
-
-            file.write("No Live Hosts Found.\n")
-
-    print(f"\nResults saved to {file_path}")
-
-    
-
-def main():
-
-    subnet = get_network()
-
-    print("\nValid Network Found")
-
-    print(subnet)
-
-    output = run_pingsweep(subnet)
-
-    hosts = extract_hosts(output)
-
-    display_hosts(hosts)
-
-    save_results(hosts)
-    
+    return common.run_cli(interactive)
 
 
 if __name__ == "__main__":
-
-    main()
+    sys.exit(main())
