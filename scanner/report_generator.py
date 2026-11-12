@@ -1,81 +1,60 @@
-import os
+"""Combine the individual scan results into one assessment report."""
 
-def read_file(filename):
+from __future__ import annotations
 
-    file_path = os.path.join("results", filename)
+import sys
+from pathlib import Path
 
-    if not os.path.exist(file_path):
-        return f"{filename} not found.\n"
-    
-    with open(file_path, "r") as file:
-        return file.read()
-    
-def generate_report():
+from scanner import common
 
-    report = ""
+REPORT_FILE = "network_assessment_report.txt"
 
-    report += "=" * 70 + "\n"
+SECTIONS = (
+    ("1. HOST DISCOVERY", "host_discovery.txt"),
+    ("2. PING SWEEP", "ping_sweep.txt"),
+    ("3. SERVICE DETECTION", "service_detection.txt"),
+    ("4. OS DETECTION", "os_detection.txt"),
+    ("5. RISK ANALYSIS", "risk_analysis.txt"),
+)
+
+
+def read_file(output_dir: str, filename: str) -> str:
+    path = Path(output_dir) / filename
+    if not path.exists():
+        return f"{filename} not found (step was skipped or failed).\n"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"{filename} could not be read: {exc}\n"
+
+
+def generate_report(output_dir: str = common.DEFAULT_OUTPUT_DIR) -> str:
+    report = "=" * 70 + "\n"
     report += "NETWORK RECONNAISSANCE AND SECURITY ASSESSMENT REPORT\n"
-    report += "=" * 70 + "\n\n"
+    report += "=" * 70 + "\n"
+    report += f"Report generated: {common.timestamp()}\n\n"
 
-    report += "1. HOST DISCOVERY\n"
-    report += "-" * 70 + "\n"
-    report += read_file("host_discovery.txt")
-    report += "\n\n"
-
-    report += "2. PING SWEEP\n"
-    report += "-" * 70 + "\n"
-    report += read_file("ping_sweep.txt")
-    report += "\n\n"
-
-    report += "3. SERVICE DETECTION\n"
-    report += "-" * 70 + "\n"
-    report += read_file("service_detection.txt")
-    report += "\n\n"
-
-    report += "4. OS DETECTION\n"
-    report += "-" * 70 + "\n"
-    report += read_file("os_detection.txt")
-    report += "\n\n"
-
-    report += "5. RISK ANALYSIS\n"
-    report += "-" * 70 + "\n"
-    report += read_file("risk_analysis.txt")
-    report += "\n"
-
+    for title, filename in SECTIONS:
+        report += f"{title}\n" + "-" * 70 + "\n"
+        report += read_file(output_dir, filename).rstrip() + "\n\n"
     return report
 
-def display_report(report):
 
-    print("\n")
-    print("=" * 70)
+def run(output_dir: str = common.DEFAULT_OUTPUT_DIR) -> str:
+    report = generate_report(output_dir)
+    print("\n" + "=" * 70)
     print("FINAL NETWORK ASSESSMENT REPORT")
     print("=" * 70)
     print(report)
+    path = common.write_text(output_dir, REPORT_FILE, report)
+    print(f"Report saved to: {path}")
+    return report
 
-def save_report(report):
 
-    os.makedirs("results", exist_ok=True)
+def main() -> int:
+    """Standalone entry point: python3 -m scanner.report_generator"""
+    return common.run_cli(lambda: run(common.DEFAULT_OUTPUT_DIR))
 
-    file_path = os.path.join(
-        "results",
-        "network_assessment_report.txt"
-    )
-
-    with open(file_path, "w") as file:
-        file.write(report)
-
-    print(f"\nReport saved to: {file_path}")
-
-def main():
-
-    print("\nGenerating Final Assessment Report...")
-
-    report = generate_report()
-
-    display_report(report)
-
-    save_report(report)
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

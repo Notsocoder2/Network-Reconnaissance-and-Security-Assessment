@@ -1,4 +1,22 @@
-import os
+"""Rule-based risk analysis of detected services and operating system."""
+
+from __future__ import annotations
+
+import sys
+from collections import Counter
+from typing import Dict, List, Optional, Tuple
+
+from scanner import common, os_detection, service_detection
+
+TXT_FILE = "risk_analysis.txt"
+JSON_FILE = "risk_analysis.json"
+
+LEVEL_ORDER = ("High", "Medium", "Low", "Unknown")
+
+DISCLAIMER = (
+    "Note: findings are rule-based and derived from detected service and OS names. "
+    "They indicate areas to review and do not confirm that a vulnerability exists."
+)
 
 RISK_DATABASE = {
 
@@ -94,302 +112,150 @@ RISK_DATABASE = {
 
 }
 
-def load_service_results():
-
-    file_path = os.path.join(
-
-        "results",
-        "service_detection.txt"
-    )
-
-    services = []
-
-    if not os.path.exists(file_path):
-
-        print("Service Detection Results Not Found.")
-
-        return services
-    
-    with open(file_path, "r") as file:
-
-        lines = file.readlines()
-
-    current_service = {}
-
-    for line in lines:
-
-        line = line.strip()
-
-        if line.startswith("Port:"):
-
-            current_service["Port"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("State:"):
-
-            current_service["State"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("Service:"):
-
-            current_service["Service"] = line.split(":", 1)[1].strip().lower()
-
-        elif line.startswith("Version:"):
-
-            current_service["Version"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("----------------------------------------"):
-
-            services.append(current_service)
-
-            current_service = {}
-
-    if current_service:
-
-        services.append(current_service)
-
-    return services
+# Nmap reports some services under different names than the keys above.
+SERVICE_ALIASES = {
+    "microsoft-ds": "smb",
+    "netbios-ssn": "smb",
+    "ms-wbt-server": "rdp",
+    "domain": "dns",
+    "mongod": "mongodb",
+    "ssl/http": "https",
+    "vnc-http": "vnc",
+}
 
 
-def load_os_results():
-
-    file_path = os.path.join(
-        "results",
-        "os_detection.txt"
-    )
-
-    os_info = {}
-
-    if not os.path.exists(file_path):
-
-        print("OS Detection Results Not Found.")
-
-        return os_info
-
-    with open(file_path, "r") as file:
-
-        lines = file.readlines()
-
-    for line in lines:
-
-        line = line.strip()
-
-        if line.startswith("Running:"):
-
-            os_info["Running"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("OS Details:"):
-
-            os_info["OS Details"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("Device Type:"):
-
-            os_info["Device Type"] = line.split(":", 1)[1].strip()
-
-        elif line.startswith("Network Distance:"):
-
-            os_info["Network Distance"] = line.split(":", 1)[1].strip()
-
-    return os_info
+def normalize_service_name(name: str) -> str:
+    """Lower-case an nmap service name, drop the '?' guess marker, apply aliases."""
+    cleaned = name.strip().lower().rstrip("?")
+    return SERVICE_ALIASES.get(cleaned, cleaned)
 
 
-def analyze_services(services):
+def load_service_results(output_dir: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    data = common.read_json(output_dir, service_detection.JSON_FILE)
+    if data is None:
+        common.LOGGER.warning("Service detection results not found; skipping services.")
+        return [], None
+    return data.get("services", []), data.get("target")
 
+
+def load_os_results(output_dir: str) -> Dict[str, str]:
+    data = common.read_json(output_dir, os_detection.JSON_FILE)
+    if data is None:
+        common.LOGGER.warning("OS detection results not found.")
+        return {}
+    return data.get("os_info", {})
+
+
+def analyze_services(services: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Map open services to known risks. Closed/filtered ports are ignored."""
     findings = []
-
-    total_risks = 0
-
     for service in services:
-
-        service_name = service["Service"].lower()
-
-        if service_name in RISK_DATABASE:
-
-            risk = RISK_DATABASE[service_name]
-
-            findings.append({
-
+        if service.get("State", "").lower() != "open":
+            continue
+        name = normalize_service_name(service.get("Service", ""))
+        entry = RISK_DATABASE.get(name)
+        if entry is None:
+            continue
+        findings.append(
+            {
                 "Type": "Service",
+                "Name": name,
+                "Port": service.get("Port", "unknown"),
+                "Level": entry["level"],
+                "Risk": entry["risk"],
+                "Recommendation": entry["recommendation"],
+            }
+        )
+    return findings
 
-                "Name": service_name,
 
-                "Port": service["Port"],
+def analyze_os(os_info: Dict[str, str]) -> List[Dict[str, str]]:
+    running = (os_info or {}).get("Running", "Unknown")
+    lowered = running.lower()
 
-                "Level": risk["level"],
-
-                "Risk": risk["risk"],
-
-                "Recommendation": risk["recommendation"]
-
-            })
-
-            total_risks += 1
-
-    return findings, total_risks
-
-def analyze_os(os_info):
-
-    findings = []
-
-    total_reisks = 0
-
-    running = os_info.get("Running", "").lower()
-
-    if "windows" in running:
-
-        findings.append({
-
+    if "windows" in lowered:
+        finding = {
             "Type": "Operating System",
-
-            "Name": os_info["Running"],
-
+            "Name": running,
             "Level": "Medium",
-
             "Risk": "Windows systems must be regularly updated to prevent exploitation of known vulnerabilities.",
-
-            "Recommendation": "Enable automatic updates, keep Windows Defender active, and install security patches regularly."
-
-        })
-
-        total_risks += 1
-
-    elif "linux" in running:
-
-        findings.append({
-
+            "Recommendation": "Enable automatic updates, keep Windows Defender active, and install security patches regularly.",
+        }
+    elif "linux" in lowered:
+        finding = {
             "Type": "Operating System",
-
-            "Name": os_info["Running"],
-
+            "Name": running,
             "Level": "Low",
-
             "Risk": "Outdated Linux packages and unnecessary services may introduce security vulnerabilities.",
-
-            "Recommendation": "Keep packages updated and disable unnecessary services."
-
-        })
-
-        total_risks += 1
-
+            "Recommendation": "Keep packages updated and disable unnecessary services.",
+        }
     else:
-
-        findings.append({
-
+        finding = {
             "Type": "Operating System",
-
             "Name": "Unknown",
-
             "Level": "Unknown",
-
-            "Risk": "Operating system could not be identified.",
-
-            "Recommendation": "Perform additional scanning or verify firewall settings."
-
-        })
-
-        total_risks += 1
-
-    return findings, total_risks
+            "Risk": "Operating system could not be identified (detection missing or inconclusive).",
+            "Recommendation": "Perform additional scanning or verify firewall settings.",
+        }
+    return [finding]
 
 
-def display_results(findings):
+def analyze(services, os_info) -> List[Dict[str, str]]:
+    """Combine service and OS findings, most severe first."""
+    findings = analyze_services(services) + analyze_os(os_info)
+    findings.sort(
+        key=lambda f: LEVEL_ORDER.index(f["Level"]) if f["Level"] in LEVEL_ORDER else len(LEVEL_ORDER)
+    )
+    return findings
 
-    print("\n")
-    print("=" * 60)
-    print("RISK ANALYSIS RESULTS")
-    print("=" * 60)
 
+def summarize(findings: List[Dict[str, str]]) -> str:
+    counts = Counter(f["Level"] for f in findings)
+    return ", ".join(f"{level}: {counts[level]}" for level in LEVEL_ORDER if counts[level])
+
+
+def render_results(findings: List[Dict[str, str]], target: Optional[str]) -> str:
+    text = common.build_header("RISK ANALYSIS RESULTS", {"Target": target or "unknown"})
     if not findings:
-
-        print("No risks identified.")
-
-        return
+        return text + "No risks identified.\n"
 
     for count, finding in enumerate(findings, start=1):
+        text += f"Risk {count}\n" + "-" * 60 + "\n"
+        text += f"Type: {finding['Type']}\n"
+        text += f"Name: {finding['Name']}\n"
+        if "Port" in finding:
+            text += f"Port: {finding['Port']}\n"
+        text += f"Risk Level: {finding['Level']}\n"
+        text += f"Risk: {finding['Risk']}\n"
+        text += f"Recommendation: {finding['Recommendation']}\n\n"
 
-        print(f"\nRisk {count}")
-        print("-" * 60)
-
-        print(f"Type           : {finding['Type']}")
-        print(f"Name           : {finding['Name']}")
-
-        if finding["Type"] == "Service":
-            print(f"Port           : {finding['Port']}")
-
-        print(f"Risk Level     : {finding['Level']}")
-        print(f"Risk           : {finding['Risk']}")
-        print(f"Recommendation : {finding['Recommendation']}")
-
-    print("\n")
-    print("=" * 60)
-    print(f"Total Risks Identified : {len(findings)}")
-    print("=" * 60)
+    text += "=" * 60 + "\n"
+    text += f"Total Risks Identified: {len(findings)} ({summarize(findings)})\n\n"
+    text += DISCLAIMER + "\n"
+    return text
 
 
-def save_results(findings):
+def run(output_dir: str = common.DEFAULT_OUTPUT_DIR) -> List[Dict[str, str]]:
+    services, target = load_service_results(output_dir)
+    os_info = load_os_results(output_dir)
+    findings = analyze(services, os_info)
 
-    os.makedirs("results", exist_ok=True)
-
-    file_path = os.path.join(
-        "results",
-        "risk_analysis.txt"
+    text = render_results(findings, target)
+    print(text)
+    path = common.write_text(output_dir, TXT_FILE, text)
+    common.write_json(
+        output_dir,
+        JSON_FILE,
+        {"target": target, "timestamp": common.timestamp(), "findings": findings},
     )
-
-    with open(file_path, "w") as file:
-
-        file.write("RISK ANALYSIS RESULTS\n")
-        file.write("=" * 60 + "\n\n")
-
-        if not findings:
-
-            file.write("No risks identified.\n")
-
-        else:
-
-            for count, finding in enumerate(findings, start=1):
-
-                file.write(f"Risk {count}\n")
-                file.write("-" * 60 + "\n")
-
-                file.write(f"Type: {finding['Type']}\n")
-                file.write(f"Name: {finding['Name']}\n")
-
-                if finding["Type"] == "Service":
-                    file.write(f"Port: {finding['Port']}\n")
-
-                file.write(f"Risk Level: {finding['Level']}\n")
-                file.write(f"Risk: {finding['Risk']}\n")
-                file.write(f"Recommendation: {finding['Recommendation']}\n")
-                file.write("\n")
-
-            file.write("=" * 60 + "\n")
-            file.write(f"Total Risks Identified: {len(findings)}\n")
-
-    print(f"\nResults saved to: {file_path}")
+    print(f"Results saved to {path}")
+    return findings
 
 
-def main():
+def main() -> int:
+    """Standalone entry point: python3 -m scanner.risk_analysis"""
+    return common.run_cli(lambda: run(common.DEFAULT_OUTPUT_DIR))
 
-    print("\nLoading Service Detection Results...")
 
-    services = load_service_results()
-
-    print("Loading OS Detection Results...")
-
-    os_info = load_os_results()
-
-    print("\nAnalyzing Services...")
-
-    service_findings, service_risks = analyze_services(services)
-
-    print("Analyzing Operating System...")
-
-    os_findings, os_risks = analyze_os(os_info)
-
-    findings = service_findings + os_findings
-
-    total_risks = service_risks + os_risks
-
-    display_results(findings)
-
-    save_results(findings)
-
-    print(f"\nAnalysis Complete. Total Risks Found: {total_risks}")
+if __name__ == "__main__":
+    sys.exit(main())
