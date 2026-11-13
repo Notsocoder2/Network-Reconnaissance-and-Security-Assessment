@@ -145,12 +145,3 @@ The tests use canned Nmap/Netdiscover output and never touch the network.
 - Parallel scanning
 - GUI
 
-## Disclaimer
-
-This project is intended **only for educational purposes and authorized security assessments**. The author accepts no responsibility for misuse. Do not scan systems or networks without explicit permission.
-
-## Author
-
-Dhruv Chauhan  
-Jaypee Institute of Information Technology  
-Electronics and Communication Engineering (Advanced Communication)
